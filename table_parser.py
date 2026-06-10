@@ -166,3 +166,60 @@ def parse_image(image_path):
     if not items:
         raise ValueError("No he podido leer productos en la imagen")
     return items
+
+
+# ===== CORRECCIONES EN LENGUAJE NATURAL (Claude API) =====
+
+PROMPT_CORRECCION = """Tienes esta lista de items de un presupuesto en JSON:
+
+{items_json}
+
+El usuario quiere hacer esta corrección:
+"{instruccion}"
+
+Aplica la corrección y responde ÚNICAMENTE con el JSON corregido, sin texto adicional, sin markdown, con esta estructura exacta:
+{{"items": [{{"concepto": "...", "cantidad": 1, "precio_unitario": 15.50}}]}}
+
+Reglas:
+- Aplica SOLO lo que pide el usuario, no cambies nada más
+- Puedes modificar, eliminar o añadir items según la instrucción
+- Si el usuario da un precio en formato español (1.234,56), conviértelo a decimal (1234.56)
+- Mantén el orden de los items salvo que pida reordenar
+"""
+
+
+def apply_correction(items, instruccion):
+    """Aplica una corrección en lenguaje natural a la lista de items usando Claude."""
+    import anthropic
+
+    client = anthropic.Anthropic()
+
+    items_json = json.dumps({'items': items}, ensure_ascii=False, indent=2)
+    prompt = PROMPT_CORRECCION.format(items_json=items_json, instruccion=instruccion)
+
+    message = client.messages.create(
+        model="claude-haiku-4-5",
+        max_tokens=4000,
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+
+    text = ''.join(block.text for block in message.content if block.type == 'text')
+    text = text.replace('```json', '').replace('```', '').strip()
+
+    data = json.loads(text)
+    new_items = []
+    for it in data.get('items', []):
+        concepto = str(it.get('concepto', '')).strip()
+        precio = it.get('precio_unitario')
+        if not concepto or precio is None:
+            continue
+        cantidad = it.get('cantidad', 1) or 1
+        new_items.append({
+            'concepto': concepto[:80],
+            'cantidad': float(cantidad),
+            'precio_unitario': float(precio)
+        })
+
+    if not new_items:
+        raise ValueError("La corrección dejó la lista vacía")
+    return new_items
