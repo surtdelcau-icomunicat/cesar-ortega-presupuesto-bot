@@ -9,7 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (Application, CommandHandler, MessageHandler,
                           filters, ContextTypes, CallbackQueryHandler)
 
-from table_parser import parse_excel, parse_image
+from table_parser import parse_excel, parse_image, apply_correction
 from pdf_presupuesto import PDFPresupuestoGenerator
 
 load_dotenv()
@@ -42,11 +42,11 @@ def init_user(user_id):
 def build_resumen(items):
     lines = ["📋 He leído esta tabla:\n"]
     subtotal = 0
-    for it in items:
+    for i, it in enumerate(items, start=1):
         total = it['cantidad'] * it['precio_unitario']
         subtotal += total
         qty = f"{it['cantidad']:g}"
-        lines.append(f"• {it['concepto']} — {qty} × {it['precio_unitario']:.2f} € = {total:.2f} €")
+        lines.append(f"{i}. {it['concepto']} — {qty} × {it['precio_unitario']:.2f} € = {total:.2f} €")
     lines.append(f"\nSubtotal: {subtotal:.2f} €")
     return "\n".join(lines)
 
@@ -131,11 +131,12 @@ async def receive_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def send_confirm_buttons(context, user_id):
     keyboard = [
         [InlineKeyboardButton("✅ Correcto, continuar", callback_data='table_ok')],
+        [InlineKeyboardButton("✏️ Corregir algo", callback_data='table_edit')],
         [InlineKeyboardButton("🔄 Volver a enviar la tabla", callback_data='table_retry')]
     ]
     await context.bot.send_message(
         chat_id=user_id,
-        text="¿Los datos son correctos?",
+        text="¿Los datos son correctos?\n(también puedes escribir directamente la corrección)",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -153,6 +154,21 @@ async def receive_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]['cliente'] = text[:50]
         await update.message.reply_text(f"✅ Cliente: {text[:50]}")
         await ask_format_msg(context, user_id)
+    elif state in ('confirming', 'editing'):
+        # Tratar el texto como una corrección en lenguaje natural
+        msg = await update.message.reply_text("⏳ Aplicando corrección...")
+        try:
+            items = apply_correction(user_data[user_id]['items'], text)
+            user_data[user_id]['items'] = items
+            user_data[user_id]['state'] = 'confirming'
+            await msg.edit_text(build_resumen(items))
+            await send_confirm_buttons(context, user_id)
+        except Exception as e:
+            logger.error(f"Error corrigiendo: {e}")
+            await msg.edit_text(
+                "❌ No he podido aplicar esa corrección. "
+                "Prueba a explicarla de otra forma (ej: 'el item 2 son 6 unidades')"
+            )
     else:
         await update.message.reply_text("📊 Envíame una foto de la tabla o un Excel (.xlsx)")
 
@@ -187,6 +203,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "💰 ¿Los precios de la tabla son sin IVA o con IVA?",
             reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif query.data == 'table_edit':
+        user_data[user_id]['state'] = 'editing'
+        await query.edit_message_text(
+            "✏️ Escribe lo que quieres corregir. Ejemplos:\n"
+            "  • \"el item 2 son 6 unidades, no 4\"\n"
+            "  • \"el precio del kit KP-TR16 es 59,90\"\n"
+            "  • \"borra la última fila\"\n"
+            "  • \"añade: Portes, 1 ud, 15€\""
         )
 
     elif query.data == 'table_retry':
